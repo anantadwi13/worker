@@ -1,7 +1,8 @@
-package worker
+package workers
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"time"
@@ -11,16 +12,21 @@ type WorkerPoolConfig struct {
 	QueueSize  int
 	WorkerSize int
 
-	// timeout in seconds
-	JobTimeout      int
-	ShutdownTimeout int
+	// 0 for infinity time
+	JobTimeout      time.Duration
+	ShutdownTimeout time.Duration
 }
 
 type workerPool struct {
 	jobQueue        chan Job
 	workerSize      int
-	jobTimeout      int
-	shutdownTimeout int
+	jobTimeout      time.Duration
+	shutdownTimeout time.Duration
+
+	status     Status
+	statusLock sync.RWMutex
+
+	wgShutdown sync.WaitGroup
 
 	workerCancellationLock sync.Mutex
 	workerCancellationFunc []func()
@@ -47,35 +53,67 @@ func NewWorkerPool(config WorkerPoolConfig) (Worker, error) {
 		workerSize:      config.WorkerSize,
 		jobTimeout:      config.JobTimeout,
 		shutdownTimeout: config.ShutdownTimeout,
+		status:          StatusCreated,
 	}, nil
 }
 
 func (w *workerPool) Start() error {
+	if w.Status() != StatusCreated {
+		return errors.New("worker has been running or already stopped")
+	}
 	w.initWorker()
 	return nil
 }
 
 func (w *workerPool) Shutdown() error {
+	if w.Status() != StatusRunning {
+		return errors.New("worker is not running")
+	}
 	w.stopWorker()
 	return nil
 }
 
-func (w *workerPool) GetJobTimeout() int {
+func (w *workerPool) Status() Status {
+	w.statusLock.RLock()
+	defer w.statusLock.RUnlock()
+	return w.status
+}
+
+func (w *workerPool) setStatus(status Status) {
+	w.statusLock.Lock()
+	defer w.statusLock.Unlock()
+	w.status = status
+}
+
+func (w *workerPool) GetJobTimeout() time.Duration {
 	return w.jobTimeout
 }
 
-func (w *workerPool) GetShutdownTimeout() int {
+func (w *workerPool) GetShutdownTimeout() time.Duration {
 	return w.shutdownTimeout
 }
 
 func (w *workerPool) Push(job Job) error {
+	if w.Status() != StatusRunning {
+		return errors.New("worker is not running")
+	}
+	if job == nil {
+		return errors.New("job is nil")
+	}
 	w.jobQueue <- job
 	return nil
 }
 
 func (w *workerPool) PushAndWait(job Job) error {
-	//TODO implement me
-	panic("implement me")
+	if w.Status() != StatusRunning {
+		return errors.New("worker is not running")
+	}
+	if job == nil {
+		return errors.New("job is nil")
+	}
+	w.jobQueue <- job
+	<-job.Done()
+	return nil
 }
 
 func (w *workerPool) initWorker() {
@@ -83,7 +121,8 @@ func (w *workerPool) initWorker() {
 	defer w.workerCancellationLock.Unlock()
 
 	for i := 0; i < w.workerSize; i++ {
-		cancelChan := make(chan IsCanceled)
+		w.wgShutdown.Add(1)
+		cancelChan := make(chan ChanSignal)
 		cancelFunc := func() {
 			close(cancelChan)
 		}
@@ -92,23 +131,43 @@ func (w *workerPool) initWorker() {
 
 		w.workerCancellationFunc = append(w.workerCancellationFunc, cancelFunc)
 	}
+	w.setStatus(StatusRunning)
 }
 
 func (w *workerPool) stopWorker() {
 	w.workerCancellationLock.Lock()
 	defer w.workerCancellationLock.Unlock()
 
+	w.setStatus(StatusStopped)
+
 	for _, f := range w.workerCancellationFunc {
 		f()
 	}
 	w.workerCancellationFunc = nil
+
+	close(w.jobQueue)
+
+	w.wgShutdown.Wait()
 }
 
-func (w *workerPool) jobDispatcher(cancelChan chan IsCanceled) {
+func (w *workerPool) jobDispatcher(cancelChan chan ChanSignal) {
+	defer func() {
+		for job := range w.jobQueue {
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			job.Do(ctx)
+			cancel()
+		}
+		w.wgShutdown.Done()
+	}()
+
 	for {
 		select {
 		case job := <-w.jobQueue:
-			done := make(chan struct{})
+			if job == nil {
+				continue
+			}
+
+			done := make(chan ChanSignal)
 
 			go func() {
 				var (
@@ -116,7 +175,7 @@ func (w *workerPool) jobDispatcher(cancelChan chan IsCanceled) {
 					cancelFunc context.CancelFunc
 				)
 				if w.jobTimeout > 0 {
-					ctx, cancelFunc = context.WithTimeout(ctx, time.Duration(w.jobTimeout)*time.Second)
+					ctx, cancelFunc = context.WithTimeout(ctx, w.jobTimeout)
 				}
 
 				job.Do(ctx)
@@ -132,11 +191,17 @@ func (w *workerPool) jobDispatcher(cancelChan chan IsCanceled) {
 				// the job is done
 			case <-cancelChan:
 				// on graceful shutdown
-				ctx, cancelFunc := context.WithTimeout(context.Background(), time.Duration(w.shutdownTimeout)*time.Second)
-
-				job.Cancel(ctx)
-
-				cancelFunc()
+				if w.shutdownTimeout > 0 {
+					select {
+					case <-done:
+					case <-time.After(w.shutdownTimeout):
+						ctx, cancel := context.WithTimeout(context.Background(), 0)
+						job.Cancel(ctx)
+						cancel()
+					}
+				} else {
+					<-done
+				}
 				return
 			}
 		case <-cancelChan:
