@@ -26,10 +26,8 @@ type workerPool struct {
 	status     Status
 	statusLock sync.RWMutex
 
-	wgShutdown sync.WaitGroup
-
-	workerCancellationLock sync.Mutex
-	workerCancellationFunc []func()
+	wgShutdown   sync.WaitGroup
+	shutdownChan chan ChanSignal
 }
 
 func NewWorkerPool(config WorkerPoolConfig) (Worker, error) {
@@ -54,22 +52,38 @@ func NewWorkerPool(config WorkerPoolConfig) (Worker, error) {
 		jobTimeout:      config.JobTimeout,
 		shutdownTimeout: config.ShutdownTimeout,
 		status:          StatusCreated,
+		shutdownChan:    make(chan ChanSignal),
 	}, nil
 }
 
 func (w *workerPool) Start() error {
-	if w.Status() != StatusCreated {
+	w.statusLock.Lock()
+	defer w.statusLock.Unlock()
+
+	if w.status != StatusCreated {
 		return errors.New("worker has been running or already stopped")
 	}
-	w.initWorker()
+	w.status = StatusRunning
+
+	for i := 0; i < w.workerSize; i++ {
+		w.wgShutdown.Add(1)
+		go w.looper()
+	}
 	return nil
 }
 
 func (w *workerPool) Shutdown() error {
-	if w.Status() != StatusRunning {
+	w.statusLock.Lock()
+	defer w.statusLock.Unlock()
+
+	if w.status != StatusRunning {
 		return errors.New("worker is not running")
 	}
-	w.stopWorker()
+	w.status = StatusStopped
+
+	close(w.shutdownChan)
+
+	w.wgShutdown.Wait()
 	return nil
 }
 
@@ -77,12 +91,6 @@ func (w *workerPool) Status() Status {
 	w.statusLock.RLock()
 	defer w.statusLock.RUnlock()
 	return w.status
-}
-
-func (w *workerPool) setStatus(status Status) {
-	w.statusLock.Lock()
-	defer w.statusLock.Unlock()
-	w.status = status
 }
 
 func (w *workerPool) GetJobTimeout() time.Duration {
@@ -100,7 +108,11 @@ func (w *workerPool) Push(job Job) error {
 	if job == nil {
 		return errors.New("job is nil")
 	}
-	w.jobQueue <- job
+	select {
+	case <-w.shutdownChan:
+		return errors.New("worker has been stopped")
+	case w.jobQueue <- job:
+	}
 	return nil
 }
 
@@ -111,101 +123,101 @@ func (w *workerPool) PushAndWait(job Job) error {
 	if job == nil {
 		return errors.New("job is nil")
 	}
-	w.jobQueue <- job
+	select {
+	case <-w.shutdownChan:
+		return errors.New("worker has been stopped")
+	case w.jobQueue <- job:
+	}
 	<-job.Done()
 	return nil
 }
 
-func (w *workerPool) initWorker() {
-	w.workerCancellationLock.Lock()
-	defer w.workerCancellationLock.Unlock()
+func (w *workerPool) looper() {
+	defer w.wgShutdown.Done()
 
-	for i := 0; i < w.workerSize; i++ {
-		w.wgShutdown.Add(1)
-		cancelChan := make(chan ChanSignal)
-		cancelFunc := func() {
-			close(cancelChan)
-		}
+	var jobTimeout *time.Duration
 
-		go w.jobDispatcher(cancelChan)
-
-		w.workerCancellationFunc = append(w.workerCancellationFunc, cancelFunc)
+	if w.jobTimeout > 0 {
+		jobTimeout = ptrDuration(w.jobTimeout)
 	}
-	w.setStatus(StatusRunning)
-}
 
-func (w *workerPool) stopWorker() {
-	w.workerCancellationLock.Lock()
-	defer w.workerCancellationLock.Unlock()
-
-	w.setStatus(StatusStopped)
-
-	for _, f := range w.workerCancellationFunc {
-		f()
-	}
-	w.workerCancellationFunc = nil
-
-	close(w.jobQueue)
-
-	w.wgShutdown.Wait()
-}
-
-func (w *workerPool) jobDispatcher(cancelChan chan ChanSignal) {
 	defer func() {
-		for job := range w.jobQueue {
-			ctx, cancel := context.WithTimeout(context.Background(), 0)
-			job.Do(ctx)
-			cancel()
+		for {
+			select {
+			case job := <-w.jobQueue:
+				if w.shutdownTimeout > 0 {
+					// force stop by setting timeout to 0
+					go w.jobDispatcher(job, nil, false, ptrDuration(0))
+				} else {
+					// run the remaining jobs
+					w.jobDispatcher(job, nil, false, jobTimeout)
+				}
+			default:
+				return
+			}
 		}
-		w.wgShutdown.Done()
 	}()
 
 	for {
+		var (
+			job Job
+			ok  bool
+		)
+
 		select {
-		case job := <-w.jobQueue:
-			if job == nil {
-				continue
-			}
-
-			done := make(chan ChanSignal)
-
-			go func() {
-				var (
-					ctx        = context.Background()
-					cancelFunc context.CancelFunc
-				)
-				if w.jobTimeout > 0 {
-					ctx, cancelFunc = context.WithTimeout(ctx, w.jobTimeout)
-				}
-
-				job.Do(ctx)
-
-				if cancelFunc != nil {
-					cancelFunc()
-				}
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// the job is done
-			case <-cancelChan:
-				// on graceful shutdown
-				if w.shutdownTimeout > 0 {
-					select {
-					case <-done:
-					case <-time.After(w.shutdownTimeout):
-						ctx, cancel := context.WithTimeout(context.Background(), 0)
-						job.Cancel(ctx)
-						cancel()
-					}
-				} else {
-					<-done
-				}
-				return
-			}
-		case <-cancelChan:
+		case <-w.shutdownChan:
 			return
+		case job, ok = <-w.jobQueue:
 		}
+
+		if !ok {
+			break
+		}
+		if job == nil {
+			continue
+		}
+
+		done := make(chan ChanSignal)
+
+		go w.jobDispatcher(job, done, false, jobTimeout)
+
+		select {
+		case <-done:
+			// the job is done
+		case <-w.shutdownChan:
+			// on graceful shutdown
+			if w.shutdownTimeout > 0 {
+				select {
+				case <-done:
+				case <-time.After(w.shutdownTimeout):
+					w.jobDispatcher(job, nil, true, ptrDuration(0))
+				}
+			} else {
+				<-done
+			}
+		}
+	}
+}
+
+func (w *workerPool) jobDispatcher(job Job, done chan ChanSignal, isCancellation bool, timeout *time.Duration) {
+	var (
+		ctx        = context.Background()
+		cancelFunc context.CancelFunc
+	)
+	if timeout != nil {
+		ctx, cancelFunc = context.WithTimeout(ctx, *timeout)
+	}
+
+	if isCancellation {
+		job.Cancel(ctx)
+	} else {
+		job.Do(ctx)
+	}
+
+	if cancelFunc != nil {
+		cancelFunc()
+	}
+	if done != nil {
+		close(done)
 	}
 }

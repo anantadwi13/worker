@@ -17,7 +17,6 @@ type simpleJob struct {
 	statusLock sync.RWMutex
 	doneChan   chan ChanSignal
 	cancelChan chan ChanSignal
-	wg         sync.WaitGroup
 }
 
 type Result struct {
@@ -53,23 +52,16 @@ func (s *simpleJob) Do(ctx context.Context) {
 	s.setStatus(StatusRunning)
 	defer s.setStatus(StatusStopped)
 
-	done := make(chan ChanSignal)
-
-	s.wg.Add(1)
 	go func() {
-		defer s.wg.Done()
-
 		s.jobFunc(s.cancelChan, s.requestData, s.resultChan)
-		close(done)
+		close(s.doneChan)
 	}()
 
 	select {
-	case <-done:
+	case <-s.doneChan:
 	case <-ctx.Done():
 		s.cancelChan <- ChanSignal{}
 	}
-
-	s.wg.Wait()
 }
 
 func (s *simpleJob) Cancel(ctx context.Context) {
@@ -82,8 +74,6 @@ func (s *simpleJob) Cancel(ctx context.Context) {
 	case <-ctx.Done():
 		s.cancelChan <- ChanSignal{}
 	}
-
-	s.wg.Wait()
 }
 
 func (s *simpleJob) Status() Status {
@@ -100,7 +90,4 @@ func (s *simpleJob) setStatus(status Status) {
 	s.statusLock.Lock()
 	defer s.statusLock.Unlock()
 	s.status = status
-	if s.status == StatusStopped {
-		close(s.doneChan)
-	}
 }
