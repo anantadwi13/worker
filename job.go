@@ -18,11 +18,6 @@ type simpleJob struct {
 	cancelChan chan ChanSignal
 }
 
-type Result struct {
-	Data  interface{}
-	Error error
-}
-
 type SimpleJobFunc func(isCanceled chan ChanSignal, params ...interface{})
 
 func NewJobSimple(
