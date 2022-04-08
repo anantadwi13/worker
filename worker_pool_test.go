@@ -17,13 +17,22 @@ type JobWrapper struct {
 }
 
 func generateDummyJob(timeout time.Duration, number *int32) Job {
-	return NewJobSimple(func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result) {
+	return NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+		if len(params) != 1 {
+			return
+		}
+
+		num, ok := params[0].(*int32)
+		if !ok {
+			return
+		}
+
 		select {
 		case <-time.After(timeout):
-			atomic.AddInt32(number, 1)
+			atomic.AddInt32(num, 1)
 		case <-isCanceled:
 		}
-	}, nil, nil)
+	}, number)
 }
 
 func TestWorkerPoolValidation(t *testing.T) {
@@ -51,11 +60,15 @@ func TestWorkerPoolMainFlow(t *testing.T) {
 
 	value := 0
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result) {
-		val, ok := requestData.(*int)
+	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+		if len(params) != 1 {
+			return
+		}
+
+		val, ok := params[0].(*int)
 		assert.True(t, ok)
 		*val++
-	}, &value, nil)
+	}, &value)
 
 	assert.NotEmpty(t, job.Id())
 
