@@ -151,12 +151,16 @@ func (w *workerPool) looper(workerId int) {
 	defer w.wgShutdown.Done()
 
 	var (
-		jobTimeout   *time.Duration
-		jobQueuePrio = make(chan Job, w.queueSize)
+		jobTimeout      *time.Duration
+		shutdownTimeout *time.Duration
+		jobQueuePrio    = make(chan Job, w.queueSize)
 	)
 
 	if w.jobTimeout > 0 {
 		jobTimeout = ptrDuration(w.jobTimeout)
+	}
+	if w.shutdownTimeout > 0 {
+		shutdownTimeout = ptrDuration(w.shutdownTimeout)
 	}
 
 	defer w.jobDeferDispatcher(w.jobQueue, jobTimeout)
@@ -186,14 +190,13 @@ func (w *workerPool) looper(workerId int) {
 			// the job is done
 		case <-w.shutdownChan:
 			// on graceful shutdown
-			if w.shutdownTimeout > 0 {
-				select {
-				case <-done:
-				case <-time.After(w.shutdownTimeout):
-					w.jobDispatcher(job, nil, true, ptrDuration(0))
-				}
-			} else {
-				<-done
+			cancellationDone := make(chan ChanSignal)
+
+			w.jobDispatcher(job, cancellationDone, true, shutdownTimeout)
+
+			select {
+			case <-cancellationDone:
+			case <-done:
 			}
 		}
 	}
