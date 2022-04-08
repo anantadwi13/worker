@@ -8,10 +8,9 @@ import (
 )
 
 type simpleJob struct {
-	id          string
-	jobFunc     JobFunc
-	requestData interface{}
-	resultChan  chan *Result
+	id      string
+	jobFunc SimpleJobFunc
+	params  []interface{}
 
 	status     Status
 	statusLock sync.RWMutex
@@ -24,19 +23,18 @@ type Result struct {
 	Error error
 }
 
-type JobFunc func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result)
+type SimpleJobFunc func(isCanceled chan ChanSignal, params ...interface{})
 
 func NewJobSimple(
-	jobFunc JobFunc, requestData interface{}, result chan *Result,
+	jobFunc SimpleJobFunc, params ...interface{},
 ) Job {
 	return &simpleJob{
-		id:          uuid.NewString(),
-		jobFunc:     jobFunc,
-		requestData: requestData,
-		resultChan:  result,
-		status:      StatusCreated,
-		cancelChan:  make(chan ChanSignal, 2),
-		doneChan:    make(chan ChanSignal),
+		id:         uuid.NewString(),
+		jobFunc:    jobFunc,
+		params:     params,
+		status:     StatusCreated,
+		cancelChan: make(chan ChanSignal, 2),
+		doneChan:   make(chan ChanSignal),
 	}
 }
 
@@ -53,7 +51,7 @@ func (s *simpleJob) Do(ctx context.Context) {
 	defer s.setStatus(StatusStopped)
 
 	go func() {
-		s.jobFunc(s.cancelChan, s.requestData, s.resultChan)
+		s.jobFunc(s.cancelChan, s.params...)
 		close(s.doneChan)
 	}()
 

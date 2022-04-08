@@ -17,13 +17,17 @@ func TestSimpleJobNormal(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result) {
+	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+		if len(params) != 1 {
+			return
+		}
+
 		select {
 		case <-time.After(10 * time.Millisecond):
-			atomic.AddInt32(requestData.(*int32), 1)
+			atomic.AddInt32(params[0].(*int32), 1)
 		case <-isCanceled:
 		}
-	}, &data, nil)
+	}, &data)
 
 	assert.NotEmpty(t, job.Id())
 	assert.Equal(t, StatusCreated, job.Status())
@@ -56,13 +60,17 @@ func TestSimpleJobCancellation(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result) {
+	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+		if len(params) != 1 {
+			return
+		}
+
 		select {
 		case <-time.After(20 * time.Millisecond):
-			atomic.AddInt32(requestData.(*int32), 1)
+			atomic.AddInt32(params[0].(*int32), 1)
 		case <-isCanceled:
 		}
-	}, &data, nil)
+	}, &data)
 
 	assert.NotEmpty(t, job.Id())
 	assert.Equal(t, StatusCreated, job.Status())
@@ -110,13 +118,17 @@ func TestSimpleJobDeadline(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, requestData interface{}, result chan *Result) {
+	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+		if len(params) != 1 {
+			return
+		}
+
 		select {
 		case <-time.After(20 * time.Millisecond):
-			atomic.AddInt32(requestData.(*int32), 1)
+			atomic.AddInt32(params[0].(*int32), 1)
 		case <-isCanceled:
 		}
-	}, &data, nil)
+	}, &data)
 
 	assert.NotEmpty(t, job.Id())
 	assert.Equal(t, StatusCreated, job.Status())
