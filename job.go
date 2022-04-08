@@ -15,21 +15,23 @@ type simpleJob struct {
 	status     Status
 	statusLock sync.RWMutex
 	doneChan   chan ChanSignal
-	cancelChan chan ChanSignal
+
+	ctxJobFunc        context.Context
+	cancelJobFuncLock sync.RWMutex
+	cancelJobFunc     context.CancelFunc
 }
 
-type SimpleJobFunc func(isCanceled chan ChanSignal, params ...interface{})
+type SimpleJobFunc func(ctx context.Context, params ...interface{})
 
 func NewJobSimple(
 	jobFunc SimpleJobFunc, params ...interface{},
 ) Job {
 	return &simpleJob{
-		id:         uuid.NewString(),
-		jobFunc:    jobFunc,
-		params:     params,
-		status:     StatusCreated,
-		cancelChan: make(chan ChanSignal, 2),
-		doneChan:   make(chan ChanSignal),
+		id:       uuid.NewString(),
+		jobFunc:  jobFunc,
+		params:   params,
+		status:   StatusCreated,
+		doneChan: make(chan ChanSignal),
 	}
 }
 
@@ -45,15 +47,26 @@ func (s *simpleJob) Do(ctx context.Context) {
 	s.setStatus(StatusRunning)
 	defer s.setStatus(StatusStopped)
 
-	go func() {
-		s.jobFunc(s.cancelChan, s.params...)
-		close(s.doneChan)
+	s.cancelJobFuncLock.Lock()
+	s.ctxJobFunc, s.cancelJobFunc = context.WithCancel(ctx)
+	s.cancelJobFuncLock.Unlock()
+
+	defer func() {
+		s.cancelJobFuncLock.RLock()
+		if s.cancelJobFunc != nil {
+			s.cancelJobFunc()
+		}
+		s.cancelJobFuncLock.RUnlock()
 	}()
+
+	go func(ctx context.Context) {
+		s.jobFunc(ctx, s.params...)
+		close(s.doneChan)
+	}(s.ctxJobFunc)
 
 	select {
 	case <-s.doneChan:
 	case <-ctx.Done():
-		s.cancelChan <- ChanSignal{}
 	}
 }
 
@@ -65,7 +78,11 @@ func (s *simpleJob) Cancel(ctx context.Context) {
 	select {
 	case <-s.doneChan:
 	case <-ctx.Done():
-		s.cancelChan <- ChanSignal{}
+		s.cancelJobFuncLock.RLock()
+		if s.cancelJobFunc != nil {
+			s.cancelJobFunc()
+		}
+		s.cancelJobFuncLock.RUnlock()
 	}
 }
 

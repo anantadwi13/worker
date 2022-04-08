@@ -17,7 +17,7 @@ func TestSimpleJobNormal(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -25,7 +25,7 @@ func TestSimpleJobNormal(t *testing.T) {
 		select {
 		case <-time.After(10 * time.Millisecond):
 			atomic.AddInt32(params[0].(*int32), 1)
-		case <-isCanceled:
+		case <-ctx.Done():
 		}
 	}, &data)
 
@@ -60,7 +60,7 @@ func TestSimpleJobCancellation(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -68,7 +68,7 @@ func TestSimpleJobCancellation(t *testing.T) {
 		select {
 		case <-time.After(20 * time.Millisecond):
 			atomic.AddInt32(params[0].(*int32), 1)
-		case <-isCanceled:
+		case <-ctx.Done():
 		}
 	}, &data)
 
@@ -118,7 +118,7 @@ func TestSimpleJobDeadline(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -126,7 +126,7 @@ func TestSimpleJobDeadline(t *testing.T) {
 		select {
 		case <-time.After(20 * time.Millisecond):
 			atomic.AddInt32(params[0].(*int32), 1)
-		case <-isCanceled:
+		case <-ctx.Done():
 		}
 	}, &data)
 
