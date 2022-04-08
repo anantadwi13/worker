@@ -121,7 +121,7 @@ func TestWorkerPoolConsistency1(t *testing.T) {
 	worker, err := NewWorkerPool(WorkerPoolConfig{
 		QueueSize:       1,
 		WorkerSize:      2,
-		ShutdownTimeout: 10 * time.Millisecond,
+		ShutdownTimeout: 20 * time.Millisecond,
 	})
 	assert.NoError(t, err)
 
@@ -130,13 +130,13 @@ func TestWorkerPoolConsistency1(t *testing.T) {
 
 	/*
 		INTERVAL 10 ms
-		|a|c|d|d|f|f|f|f|f|f| | | -> worker 1
-		|b|b|b|e|g|g|g|g|g|g| | | -> worker 2
-		| | | | | |h|h|h|h|h| | | -> queue 1
-		| | | | | | |i|i|i|i| | | -> out of queue
-		| | | | | | | |j|j|j| | | -> out of queue
-		| | | | | | | |k|k|k| | | -> out of queue
-		| | | | | | | | |x| | | | -> shutdown trigger
+		|a|c|d|d|f|f|f|f|f|h|h| | -> worker 1
+		|b|b|b|e|g|g|g|g|g|g|g| | -> worker 2
+		| | | | | |h|h|h|h| | | | -> queue 1
+		| | | | | | |i|i|i| | | | -> out of queue
+		| | | | | | | |j|j| | | | -> out of queue
+		| | | | | | | |k|k| | | | -> out of queue
+		| | | | | | | | |x|x| | | -> shutdown trigger
 	*/
 
 	var (
@@ -150,8 +150,8 @@ func TestWorkerPoolConsistency1(t *testing.T) {
 			{"c", 10 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
 			{"d", 20 * time.Millisecond, false, generateDummyJob(20*time.Millisecond, &data), false},
 			{"e", 30 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"f", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"g", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
+			{"f", 40 * time.Millisecond, false, generateDummyJob(50*time.Millisecond, &data), false},
+			{"g", 40 * time.Millisecond, false, generateDummyJob(70*time.Millisecond, &data), false},
 			{"h", 50 * time.Millisecond, true, generateDummyJob(20*time.Millisecond, &data), false},
 			{"i", 60 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), true},
 			{"j", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
@@ -185,7 +185,7 @@ func TestWorkerPoolConsistency1(t *testing.T) {
 	}
 
 	time.Sleep(120 * time.Millisecond)
-	assert.Equal(t, int32(5), atomic.LoadInt32(&data))
+	assert.Equal(t, int32(6), atomic.LoadInt32(&data))
 }
 
 func TestWorkerPoolConsistency2(t *testing.T) {
