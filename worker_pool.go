@@ -190,14 +190,7 @@ func (w *workerPool) looper(workerId int) {
 			// the job is done
 		case <-w.shutdownChan:
 			// on graceful shutdown
-			cancellationDone := make(chan ChanSignal)
-
-			w.jobDispatcher(job, cancellationDone, true, shutdownTimeout)
-
-			select {
-			case <-cancellationDone:
-			case <-done:
-			}
+			w.jobDispatcher(job, nil, true, shutdownTimeout)
 		}
 	}
 }
