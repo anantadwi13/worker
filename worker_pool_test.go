@@ -1,6 +1,7 @@
 package workers
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ type JobWrapper struct {
 }
 
 func generateDummyJob(timeout time.Duration, number *int32) Job {
-	return NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+	return NewJobSimple(func(ctx context.Context, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -30,7 +31,7 @@ func generateDummyJob(timeout time.Duration, number *int32) Job {
 		select {
 		case <-time.After(timeout):
 			atomic.AddInt32(num, 1)
-		case <-isCanceled:
+		case <-ctx.Done():
 		}
 	}, number)
 }
@@ -60,7 +61,7 @@ func TestWorkerPoolMainFlow(t *testing.T) {
 
 	value := 0
 
-	job := NewJobSimple(func(isCanceled chan ChanSignal, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
