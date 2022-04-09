@@ -93,7 +93,7 @@ func (w *workerPool) Shutdown() error {
 	w.statusLock.Lock()
 	if w.status != StatusRunning {
 		w.statusLock.Unlock()
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	w.status = StatusStopped
 	w.statusLock.Unlock()
@@ -126,14 +126,14 @@ func (w *workerPool) GetShutdownTimeout() time.Duration {
 
 func (w *workerPool) Push(job Job) error {
 	if w.Status() != StatusRunning {
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	if job == nil {
 		return errors.New("job is nil")
 	}
 	select {
 	case <-w.shutdownChan:
-		return errors.New("worker has been stopped")
+		return ErrWorkerNotRunning
 	case w.jobQueue <- job:
 	}
 	return nil
@@ -141,14 +141,14 @@ func (w *workerPool) Push(job Job) error {
 
 func (w *workerPool) PushAndWait(job Job) error {
 	if w.Status() != StatusRunning {
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	if job == nil {
 		return errors.New("job is nil")
 	}
 	select {
 	case <-w.shutdownChan:
-		return errors.New("worker has been stopped")
+		return ErrWorkerNotRunning
 	case w.jobQueue <- job:
 	}
 	<-job.Done()
