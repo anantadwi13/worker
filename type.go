@@ -31,6 +31,7 @@ type Worker interface {
 	Start() error
 	Shutdown() error
 	Status() Status
+	Done() chan ChanSignal
 
 	GetJobTimeout() time.Duration
 	GetShutdownTimeout() time.Duration

@@ -2,7 +2,7 @@ package workers
 
 import (
 	"context"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,23 +17,13 @@ type JobWrapper struct {
 	WantErr     bool
 }
 
-func generateDummyJob(timeout time.Duration, number *int32) Job {
-	return NewJobSimple(func(ctx context.Context, params ...interface{}) {
-		if len(params) != 1 {
-			return
-		}
-
-		num, ok := params[0].(*int32)
-		if !ok {
-			return
-		}
-
-		select {
-		case <-time.After(timeout):
-			atomic.AddInt32(num, 1)
-		case <-ctx.Done():
-		}
-	}, number)
+type JobConfig struct {
+	Id               string
+	ExecutedAt       int
+	Duration         int
+	PushAndWait      bool
+	SuccessExecution bool
+	ErrScheduling    bool
 }
 
 func TestWorkerPoolValidation(t *testing.T) {
@@ -61,7 +51,7 @@ func TestWorkerPoolMainFlow(t *testing.T) {
 
 	value := 0
 
-	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, jobId string, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -117,293 +107,261 @@ func TestWorkerPoolMainFlow(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestWorkerPoolConsistency1(t *testing.T) {
-	worker, err := NewWorkerPool(WorkerPoolConfig{
-		QueueSize:       1,
-		WorkerSize:      2,
-		ShutdownTimeout: 20 * time.Millisecond,
-	})
-	assert.NoError(t, err)
-
-	err = worker.Start()
-	assert.NoError(t, err)
-
-	/*
-		INTERVAL 10 ms
-		|a|c|d|d|f|f|f|f|f|h|h| | -> worker 1
-		|b|b|b|e|g|g|g|g|g|g|g| | -> worker 2
-		| | | | | |h|h|h|h| | | | -> queue 1
-		| | | | | | |i|i|i| | | | -> out of queue
-		| | | | | | | |j|j| | | | -> out of queue
-		| | | | | | | |k|k| | | | -> out of queue
-		| | | | | | | | |x|x| | | -> shutdown trigger
-	*/
-
-	var (
-		data = int32(0)
-
-		jobs = []*JobWrapper{
-			{"nil1", 0 * time.Millisecond, true, nil, true},
-			{"nil2", 0 * time.Millisecond, false, nil, true},
-			{"a", 0 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"b", 0 * time.Millisecond, false, generateDummyJob(30*time.Millisecond, &data), false},
-			{"c", 10 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"d", 20 * time.Millisecond, false, generateDummyJob(20*time.Millisecond, &data), false},
-			{"e", 30 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"f", 40 * time.Millisecond, false, generateDummyJob(50*time.Millisecond, &data), false},
-			{"g", 40 * time.Millisecond, false, generateDummyJob(70*time.Millisecond, &data), false},
-			{"h", 50 * time.Millisecond, true, generateDummyJob(20*time.Millisecond, &data), false},
-			{"i", 60 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), true},
-			{"j", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-			{"k", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-		}
-	)
-
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		err = worker.Shutdown()
-		assert.NoError(t, err)
-	}()
-
-	for _, job := range jobs {
-		go func(job *JobWrapper) {
-			time.Sleep(job.Wait)
-
-			var err error
-
-			if job.PushAndWait {
-				err = worker.PushAndWait(job.Job)
-			} else {
-				err = worker.Push(job.Job)
-			}
-			if job.WantErr {
-				assert.Error(t, err, "%+v", job)
-				return
-			}
-			assert.NoError(t, err, "%+v", job)
-		}(job)
+func TestWorkerPoolConsistency(t *testing.T) {
+	type Test struct {
+		Name         string
+		WorkerConfig WorkerPoolConfig
+		JobConfigs   []*JobConfig
+		TimeUnit     time.Duration
+		ShutdownAt   int
 	}
 
-	time.Sleep(120 * time.Millisecond)
-	assert.Equal(t, int32(6), atomic.LoadInt32(&data))
-}
+	tests := []Test{
+		{
+			Name: "test 1",
+			WorkerConfig: WorkerPoolConfig{
+				QueueSize:       1,
+				WorkerSize:      2,
+				ShutdownTimeout: 2,
+			},
+			JobConfigs: []*JobConfig{
+				/*
+					INTERVAL 10 ms
+					|a|c|d|d|f|f|f|f|f|h|h| | -> worker 1
+					|b|b|b|e|g|g|g|g|g|g|g| | -> worker 2
+					| | | | | |h|h|h|h| | | | -> queue 1
+					| | | | | | |i|i|i| | | | -> out of queue
+					| | | | | | | |j|j| | | | -> out of queue
+					| | | | | | | |k|k| | | | -> out of queue
+					| | | | | | | | |x|x| | | -> shutdown trigger
+				*/
+				{"a", 0, 1, false, true, false},
+				{"b", 0, 3, false, true, false},
+				{"c", 1, 1, false, true, false},
+				{"d", 2, 2, false, true, false},
+				{"e", 3, 1, false, true, false},
+				{"f", 4, 5, false, true, false},
+				{"g", 4, 7, false, false, false},
+				{"h", 5, 2, true, false, false},
+				{"i", 6, 1, true, false, true},
+				{"j", 7, 1, false, false, true},
+				{"k", 7, 1, false, false, true},
+			},
+			TimeUnit:   10 * time.Millisecond,
+			ShutdownAt: 8,
+		},
+		{
+			Name: "test 2",
+			WorkerConfig: WorkerPoolConfig{
+				QueueSize:       2,
+				WorkerSize:      2,
+				ShutdownTimeout: 1,
+			},
+			JobConfigs: []*JobConfig{
+				/*
+					INTERVAL 10 ms
+					|a|c|d|d|f|f|f|f|f|f| | | -> worker 1
+					|b|b|b|e|g|g|g|g|g|g| | | -> worker 2
+					| | | | | |h|h|h|h|h| | | -> queue 1
+					| | | | | | |i|i|i|i| | | -> queue 2
+					| | | | | | | |j|j|j| | | -> out of queue
+					| | | | | | | |k|k|k| | | -> out of queue
+					| | | | | | | | |x| | | | -> shutdown trigger
+				*/
+				{"a", 0, 1, false, true, false},
+				{"b", 0, 3, false, true, false},
+				{"c", 1, 1, false, true, false},
+				{"d", 2, 2, false, true, false},
+				{"e", 3, 1, false, true, false},
+				{"f", 4, 6, false, false, false},
+				{"g", 4, 6, false, false, false},
+				{"h", 5, 1, false, false, false},
+				{"i", 6, 1, true, false, false},
+				{"j", 7, 1, false, false, true},
+				{"k", 7, 1, false, false, true},
+			},
+			TimeUnit:   10 * time.Millisecond,
+			ShutdownAt: 8,
+		},
+		{
+			Name: "test 3 without shutdown timeout",
+			WorkerConfig: WorkerPoolConfig{
+				QueueSize:  2,
+				WorkerSize: 2,
+			},
+			JobConfigs: []*JobConfig{
+				/*
+					INTERVAL 10 ms
+					|a|c|d|d|f|f|f|f|f|f|h| | -> worker 1
+					|b|b|b|e|g|g|g|g|g|g|i| | -> worker 2
+					| | | | | |h|h|h|h|h| | | -> queue 1
+					| | | | | | |i|i|i|i| | | -> queue 2
+					| | | | | | | |j|j|j| | | -> out of queue
+					| | | | | | | |k|k|k| | | -> out of queue
+					| | | | | | | | |x| | | | -> shutdown trigger
+				*/
+				{"a", 0, 1, false, true, false},
+				{"b", 0, 3, false, true, false},
+				{"c", 1, 1, false, true, false},
+				{"d", 2, 2, false, true, false},
+				{"e", 3, 1, false, true, false},
+				{"f", 4, 6, false, true, false},
+				{"g", 4, 6, false, true, false},
+				{"h", 5, 1, true, true, false},
+				{"i", 6, 1, true, true, false},
+				{"j", 7, 1, false, false, true},
+				{"k", 7, 1, false, false, true},
+			},
+			TimeUnit:   10 * time.Millisecond,
+			ShutdownAt: 8,
+		},
+		{
+			Name: "test 4 with job timeout",
+			WorkerConfig: WorkerPoolConfig{
+				QueueSize:  1,
+				WorkerSize: 2,
+				JobTimeout: 7,
+			},
+			JobConfigs: []*JobConfig{
+				/*
+					INTERVAL 10 ms
+					|a|c|d|d|f|f|f|f|f|f|f|f| | -> worker 1
+					|b|b|b|e|g|g|g|g|g|g|h|h| | -> worker 2
+					| | | | | |h|h|h|h|h| | | | -> queue 1
+					| | | | | | |i|i|i|i| | | | -> out of queue
+					| | | | | | | |j|j|j| | | | -> out of queue
+					| | | | | | | |k|k|k| | | | -> out of queue
+					| | | | | | | | |x| | | | | -> shutdown trigger
 
-func TestWorkerPoolConsistency2(t *testing.T) {
-	worker, err := NewWorkerPool(WorkerPoolConfig{
-		QueueSize:       2,
-		WorkerSize:      2,
-		ShutdownTimeout: 10 * time.Millisecond,
-	})
-	assert.NoError(t, err)
-
-	err = worker.Start()
-	assert.NoError(t, err)
-
-	/*
-		INTERVAL 10 ms
-		|a|c|d|d|f|f|f|f|f|f| | | -> worker 1
-		|b|b|b|e|g|g|g|g|g|g| | | -> worker 2
-		| | | | | |h|h|h|h|h| | | -> queue 1
-		| | | | | | |i|i|i|i| | | -> queue 2
-		| | | | | | | |j|j|j| | | -> out of queue
-		| | | | | | | |k|k|k| | | -> out of queue
-		| | | | | | | | |x| | | | -> shutdown trigger
-	*/
-
-	var (
-		data = int32(0)
-
-		jobs = []*JobWrapper{
-			{"a", 0 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"b", 0 * time.Millisecond, false, generateDummyJob(30*time.Millisecond, &data), false},
-			{"c", 10 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"d", 20 * time.Millisecond, false, generateDummyJob(20*time.Millisecond, &data), false},
-			{"e", 30 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"f", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"g", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"h", 50 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"i", 60 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), false},
-			{"j", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-			{"k", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-		}
-	)
-
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		err = worker.Shutdown()
-		assert.NoError(t, err)
-	}()
-
-	for _, job := range jobs {
-		go func(job *JobWrapper) {
-			time.Sleep(job.Wait)
-
-			var err error
-
-			if sj, ok := job.Job.(*simpleJob); ok {
-				sj.id = job.Name
-			}
-
-			if job.PushAndWait {
-				err = worker.PushAndWait(job.Job)
-			} else {
-				err = worker.Push(job.Job)
-			}
-			if job.WantErr {
-				assert.Error(t, err, "%+v", job)
-				return
-			}
-			assert.NoError(t, err, "%+v", job)
-		}(job)
+					f job timeout > 70 ms, then it should not be counted
+				*/
+				{"a", 0, 1, false, true, false},
+				{"b", 0, 3, false, true, false},
+				{"c", 1, 1, false, true, false},
+				{"d", 2, 2, false, true, false},
+				{"e", 3, 1, false, true, false},
+				{"f", 4, 8, false, false, false},
+				{"g", 4, 6, false, true, false},
+				{"h", 5, 2, true, true, false},
+				{"i", 6, 1, true, false, true},
+				{"j", 7, 1, false, false, true},
+				{"k", 7, 1, false, false, true},
+			},
+			TimeUnit:   10 * time.Millisecond,
+			ShutdownAt: 8,
+		},
 	}
 
-	time.Sleep(120 * time.Millisecond)
-	assert.Equal(t, int32(5), atomic.LoadInt32(&data))
-}
+	for _, test := range tests {
+		t.Run(test.Name, func(tt *testing.T) {
+			test.WorkerConfig.JobTimeout *= test.TimeUnit
+			test.WorkerConfig.ShutdownTimeout *= test.TimeUnit
 
-func TestWorkerPoolConsistency3(t *testing.T) {
-	worker, err := NewWorkerPool(WorkerPoolConfig{
-		QueueSize:  2,
-		WorkerSize: 2,
-	})
-	assert.NoError(t, err)
+			worker, err := NewWorkerPool(test.WorkerConfig)
+			assert.NoError(tt, err)
 
-	err = worker.Start()
-	assert.NoError(t, err)
+			var (
+				actualSuccessJob   = &sync.Map{}
+				expectedSuccessJob = make(map[string]bool, len(test.JobConfigs))
+				jobWrappers        []*JobWrapper
+			)
 
-	/*
-		INTERVAL 10 ms
-		|a|c|d|d|f|f|f|f|f|f|h| | -> worker 1
-		|b|b|b|e|g|g|g|g|g|g|i| | -> worker 2
-		| | | | | |h|h|h|h|h| | | -> queue 1
-		| | | | | | |i|i|i|i| | | -> queue 2
-		| | | | | | | |j|j|j| | | -> out of queue
-		| | | | | | | |k|k|k| | | -> out of queue
-		| | | | | | | | |x| | | | -> shutdown trigger
-	*/
+			for _, config := range test.JobConfigs {
+				job := NewJobSimple(func(ctx context.Context, jobId string, params ...interface{}) {
+					if len(params) != 2 {
+						return
+					}
 
-	var (
-		data = int32(0)
+					jobDuration, ok := params[0].(time.Duration)
+					if !ok {
+						return
+					}
+					successJob, ok := params[1].(*sync.Map)
+					if !ok {
+						return
+					}
 
-		jobs = []*JobWrapper{
-			{"nil1", 0 * time.Millisecond, true, nil, true},
-			{"nil2", 0 * time.Millisecond, false, nil, true},
-			{"a", 0 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"b", 0 * time.Millisecond, false, generateDummyJob(30*time.Millisecond, &data), false},
-			{"c", 10 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"d", 20 * time.Millisecond, false, generateDummyJob(20*time.Millisecond, &data), false},
-			{"e", 30 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"f", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"g", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"h", 50 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), false},
-			{"i", 60 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), false},
-			{"j", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-			{"k", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-		}
-	)
+					select {
+					case <-time.After(jobDuration):
+						successJob.Store(jobId, true)
+					case <-ctx.Done():
+						successJob.Store(jobId, false)
+					}
+				}, time.Duration(config.Duration)*test.TimeUnit, actualSuccessJob)
 
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		err = worker.Shutdown()
-		assert.NoError(t, err)
-	}()
+				if sj, ok := job.(*simpleJob); ok {
+					sj.id = config.Id
+				}
 
-	for _, job := range jobs {
-		go func(job *JobWrapper) {
-			time.Sleep(job.Wait)
-
-			var err error
-
-			if sj, ok := job.Job.(*simpleJob); ok {
-				sj.id = job.Name
+				jobWrappers = append(jobWrappers, &JobWrapper{
+					Name:        config.Id,
+					Wait:        time.Duration(config.ExecutedAt) * test.TimeUnit,
+					PushAndWait: config.PushAndWait,
+					Job:         job,
+					WantErr:     config.ErrScheduling,
+				})
+				expectedSuccessJob[config.Id] = config.SuccessExecution
 			}
 
-			if job.PushAndWait {
-				err = worker.PushAndWait(job.Job)
-			} else {
-				err = worker.Push(job.Job)
+			jobWrappers = append(jobWrappers, &JobWrapper{
+				Name:        "nil job 1",
+				Wait:        time.Duration(0) * test.TimeUnit,
+				PushAndWait: false,
+				Job:         nil,
+				WantErr:     true,
+			})
+			jobWrappers = append(jobWrappers, &JobWrapper{
+				Name:        "nil job 2",
+				Wait:        time.Duration(0) * test.TimeUnit,
+				PushAndWait: true,
+				Job:         nil,
+				WantErr:     true,
+			})
+
+			err = worker.Start()
+			assert.NoError(tt, err)
+
+			go func() {
+				time.Sleep(time.Duration(test.ShutdownAt) * test.TimeUnit)
+				err = worker.Shutdown()
+				assert.NoError(tt, err)
+			}()
+
+			// job scheduling
+
+			for _, jobWrapper := range jobWrappers {
+				go func(jobWrapper *JobWrapper) {
+					time.Sleep(jobWrapper.Wait)
+
+					var err error
+
+					if jobWrapper.PushAndWait {
+						err = worker.PushAndWait(jobWrapper.Job)
+					} else {
+						err = worker.Push(jobWrapper.Job)
+					}
+
+					if jobWrapper.WantErr {
+						assert.Error(tt, err, "%+v", jobWrapper)
+						return
+					}
+					assert.NoError(tt, err, "%+v", jobWrapper)
+				}(jobWrapper)
 			}
-			if job.WantErr {
-				assert.Error(t, err, "%+v", job)
-				return
-			}
-			assert.NoError(t, err, "%+v", job)
-		}(job)
+
+			<-worker.Done()
+
+			// validation
+
+			successCount := 0
+			actualSuccessJob.Range(func(key, value interface{}) bool {
+				if value.(bool) {
+					successCount++
+				}
+				assert.EqualValues(tt, expectedSuccessJob[key.(string)], value, "jobId %s", key)
+				return true
+			})
+			tt.Log("success count", successCount)
+		})
 	}
-
-	time.Sleep(120 * time.Millisecond)
-	assert.Equal(t, int32(9), atomic.LoadInt32(&data))
-}
-
-func TestWorkerPoolConsistency4(t *testing.T) {
-	worker, err := NewWorkerPool(WorkerPoolConfig{
-		QueueSize:  1,
-		WorkerSize: 2,
-		JobTimeout: 70 * time.Millisecond,
-	})
-	assert.NoError(t, err)
-
-	err = worker.Start()
-	assert.NoError(t, err)
-
-	/*
-		INTERVAL 10 ms
-		|a|c|d|d|f|f|f|f|f|f|f|f| | -> worker 1
-		|b|b|b|e|g|g|g|g|g|g|h|h| | -> worker 2
-		| | | | | |h|h|h|h|h| | | | -> queue 1
-		| | | | | | |i|i|i|i| | | | -> out of queue
-		| | | | | | | |j|j|j| | | | -> out of queue
-		| | | | | | | |k|k|k| | | | -> out of queue
-		| | | | | | | | |x| | | | | -> shutdown trigger
-
-		f job timeout > 70 ms, then it should not be counted
-	*/
-
-	var (
-		data = int32(0)
-
-		jobs = []*JobWrapper{
-			{"nil1", 0 * time.Millisecond, true, nil, true},
-			{"nil2", 0 * time.Millisecond, false, nil, true},
-			{"a", 0 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"b", 0 * time.Millisecond, false, generateDummyJob(30*time.Millisecond, &data), false},
-			{"c", 10 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"d", 20 * time.Millisecond, false, generateDummyJob(20*time.Millisecond, &data), false},
-			{"e", 30 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), false},
-			{"f", 40 * time.Millisecond, false, generateDummyJob(80*time.Millisecond, &data), false},
-			{"g", 40 * time.Millisecond, false, generateDummyJob(60*time.Millisecond, &data), false},
-			{"h", 50 * time.Millisecond, true, generateDummyJob(20*time.Millisecond, &data), false},
-			{"i", 60 * time.Millisecond, true, generateDummyJob(10*time.Millisecond, &data), true},
-			{"j", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-			{"k", 70 * time.Millisecond, false, generateDummyJob(10*time.Millisecond, &data), true},
-		}
-	)
-
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		err = worker.Shutdown()
-		assert.NoError(t, err)
-	}()
-
-	for _, job := range jobs {
-		go func(job *JobWrapper) {
-			time.Sleep(job.Wait)
-
-			var err error
-
-			if job.PushAndWait {
-				err = worker.PushAndWait(job.Job)
-			} else {
-				err = worker.Push(job.Job)
-			}
-			if job.WantErr {
-				assert.Error(t, err, "%+v", job)
-				return
-			}
-			assert.NoError(t, err, "%+v", job)
-		}(job)
-	}
-
-	time.Sleep(130 * time.Millisecond)
-	assert.Equal(t, int32(7), atomic.LoadInt32(&data))
 }
