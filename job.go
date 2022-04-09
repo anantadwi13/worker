@@ -21,7 +21,7 @@ type simpleJob struct {
 	cancelJobFunc     context.CancelFunc
 }
 
-type SimpleJobFunc func(ctx context.Context, params ...interface{})
+type SimpleJobFunc func(ctx context.Context, jobId string, params ...interface{})
 
 func NewJobSimple(
 	jobFunc SimpleJobFunc, params ...interface{},
@@ -60,7 +60,7 @@ func (s *simpleJob) Do(ctx context.Context) {
 	}()
 
 	go func(ctx context.Context) {
-		s.jobFunc(ctx, s.params...)
+		s.jobFunc(ctx, s.id, s.params...)
 		close(s.doneChan)
 	}(s.ctxJobFunc)
 

@@ -15,19 +15,22 @@ func TestSimpleJobNormal(t *testing.T) {
 	var (
 		data = int32(0)
 		ctx  = context.Background()
+
+		jobId string
 	)
 
-	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
-		if len(params) != 1 {
+	job := NewJobSimple(func(ctx context.Context, jobId string, params ...interface{}) {
+		if len(params) != 2 {
 			return
 		}
 
 		select {
 		case <-time.After(10 * time.Millisecond):
-			atomic.AddInt32(params[0].(*int32), 1)
+			*(params[0].(*int32))++
+			*(params[1].(*string)) = jobId
 		case <-ctx.Done():
 		}
-	}, &data)
+	}, &data, &jobId)
 
 	assert.NotEmpty(t, job.Id())
 	assert.Equal(t, StatusCreated, job.Status())
@@ -48,8 +51,10 @@ func TestSimpleJobNormal(t *testing.T) {
 		assert.Equal(t, StatusStopped, job.Status())
 	}()
 
-	time.Sleep(20 * time.Millisecond)
-	assert.EqualValues(t, 1, atomic.LoadInt32(&data))
+	<-job.Done()
+	// it will not turn into race conditions since the job is already done
+	assert.EqualValues(t, 1, data)
+	assert.EqualValues(t, job.Id(), jobId)
 }
 
 func TestSimpleJobCancellation(t *testing.T) {
@@ -60,7 +65,7 @@ func TestSimpleJobCancellation(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, jobId string, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}
@@ -118,7 +123,7 @@ func TestSimpleJobDeadline(t *testing.T) {
 		ctx  = context.Background()
 	)
 
-	job := NewJobSimple(func(ctx context.Context, params ...interface{}) {
+	job := NewJobSimple(func(ctx context.Context, jobId string, params ...interface{}) {
 		if len(params) != 1 {
 			return
 		}

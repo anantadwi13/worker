@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -12,6 +13,10 @@ const (
 	StatusCreated Status = iota
 	StatusRunning
 	StatusStopped
+)
+
+var (
+	ErrWorkerNotRunning = errors.New("worker is not running")
 )
 
 type Job interface {
@@ -31,6 +36,7 @@ type Worker interface {
 	Start() error
 	Shutdown() error
 	Status() Status
+	Done() chan ChanSignal
 
 	GetJobTimeout() time.Duration
 	GetShutdownTimeout() time.Duration

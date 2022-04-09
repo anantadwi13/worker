@@ -31,6 +31,7 @@ type workerPool struct {
 
 	wgShutdown   sync.WaitGroup
 	shutdownChan chan ChanSignal
+	doneChan     chan ChanSignal
 }
 
 var (
@@ -62,6 +63,7 @@ func NewWorkerPool(config WorkerPoolConfig) (Worker, error) {
 		shutdownTimeout: config.ShutdownTimeout,
 		status:          StatusCreated,
 		shutdownChan:    make(chan ChanSignal),
+		doneChan:        make(chan ChanSignal),
 	}, nil
 }
 
@@ -91,7 +93,7 @@ func (w *workerPool) Shutdown() error {
 	w.statusLock.Lock()
 	if w.status != StatusRunning {
 		w.statusLock.Unlock()
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	w.status = StatusStopped
 	w.statusLock.Unlock()
@@ -99,6 +101,8 @@ func (w *workerPool) Shutdown() error {
 	close(w.shutdownChan)
 
 	w.wgShutdown.Wait()
+
+	close(w.doneChan)
 	return nil
 }
 
@@ -106,6 +110,10 @@ func (w *workerPool) Status() Status {
 	w.statusLock.RLock()
 	defer w.statusLock.RUnlock()
 	return w.status
+}
+
+func (w *workerPool) Done() chan ChanSignal {
+	return w.doneChan
 }
 
 func (w *workerPool) GetJobTimeout() time.Duration {
@@ -118,14 +126,14 @@ func (w *workerPool) GetShutdownTimeout() time.Duration {
 
 func (w *workerPool) Push(job Job) error {
 	if w.Status() != StatusRunning {
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	if job == nil {
 		return errors.New("job is nil")
 	}
 	select {
 	case <-w.shutdownChan:
-		return errors.New("worker has been stopped")
+		return ErrWorkerNotRunning
 	case w.jobQueue <- job:
 	}
 	return nil
@@ -133,14 +141,14 @@ func (w *workerPool) Push(job Job) error {
 
 func (w *workerPool) PushAndWait(job Job) error {
 	if w.Status() != StatusRunning {
-		return errors.New("worker is not running")
+		return ErrWorkerNotRunning
 	}
 	if job == nil {
 		return errors.New("job is nil")
 	}
 	select {
 	case <-w.shutdownChan:
-		return errors.New("worker has been stopped")
+		return ErrWorkerNotRunning
 	case w.jobQueue <- job:
 	}
 	<-job.Done()
@@ -210,6 +218,9 @@ func (w *workerPool) jobDispatcher(job Job, done chan ChanSignal, isCancellation
 		job.Do(ctx)
 	}
 
+	// to make sure the job is already done
+	<-job.Done()
+
 	if cancelFunc != nil {
 		cancelFunc()
 	}
@@ -223,7 +234,7 @@ func (w *workerPool) jobDeferDispatcher(jobQueue chan Job, jobTimeout *time.Dura
 		case job := <-jobQueue:
 			if w.shutdownTimeout > 0 {
 				// force stop by setting timeout to 0
-				go w.jobDispatcher(job, nil, false, ptrDuration(0))
+				w.jobDispatcher(job, nil, false, ptrDuration(0))
 			} else {
 				// run the remaining jobs
 				w.jobDispatcher(job, nil, false, jobTimeout)
